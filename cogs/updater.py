@@ -1,57 +1,137 @@
-import asyncio
-import os
-
-from aiohttp import web
-import hmac
-from git import Repo
-
 from discord.ext import commands
+import asyncio
+import importlib
+import os
+import re
+import sys
+import subprocess
+from typing import TYPE_CHECKING, Any, Optional
+from cogs.utils.context import Context
 
 
 class Updater(commands.Cog):
-    GITHUB_SECRET = os.environ["GITHUB_SECRET"]
-    REPO_PATH = os.environ["REPO_PATH"]
+    """Admin-only commands that make the bot dynamic."""
 
     def __init__(self, bot):
         self.bot = bot
+        self._last_result: Optional[Any] = None
 
     async def cog_load(self):
         print(f"Loaded {__class__}")
 
-    async def webserver(self):
-        async def github_webhook_endpoint(request):
-            signature = request.headers.get("X-Hub-Signature")
-            sha, signature = signature.split('=')
+    async def run_process(self, command: str) -> list[str]:
+        try:
+            process = await asyncio.create_subprocess_shell(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            result = await process.communicate()
+        except NotImplementedError:
+            process = subprocess.Popen(command, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+            result = await self.bot.loop.run_in_executor(None, process.communicate)
 
-            # Create local hash of payload
-            digest = hmac.new(Updater.GITHUB_SECRET.encode(), request.data, digestmod='sha1').hexdigest()
+        return [output.decode() for output in result]
 
-            # Verify signature
-            if hmac.compare_digest(signature, "sha1=" + digest):
-                repo = Repo(self.REPO_PATH)
-                origin = repo.remotes.origin
-                origin.pull('--rebase')
+    async def cog_check(self, ctx: Context) -> bool:
+        return await self.bot.is_owner(ctx.author)
 
-                commit = request.json['after'][0:6]
-                print(f'Repository updated with commit {commit}')
+    @commands.command(hidden=True)
+    async def load(self, ctx: Context, *, module: str):
+        """Loads a module."""
+        try:
+            await self.bot.load_extension(module)
+        except commands.ExtensionError as e:
+            await ctx.send(f'{e.__class__.__name__}: {e}')
+        else:
+            await ctx.send('\N{OK HAND SIGN}')
 
-            return web.Response(text="thanks")
+    @commands.command(hidden=True)
+    async def unload(self, ctx: Context, *, module: str):
+        """Unloads a module."""
+        try:
+            await self.bot.unload_extension(module)
+        except commands.ExtensionError as e:
+            await ctx.send(f'{e.__class__.__name__}: {e}')
+        else:
+            await ctx.send('\N{OK HAND SIGN}')
 
-        app = web.Application()
-        app.router.add_post('/github', github_webhook_endpoint)
-        runner = web.AppRunner(app)
-        await runner.setup()
-        self.site = web.TCPSite(runner, '127.0.0.1', 8080)
-        await self.bot.wait_until_ready()
-        await self.site.start()
+    @commands.group(name='reload', hidden=True, invoke_without_command=True)
+    async def _reload(self, ctx: Context, *, module: str):
+        """Reloads a module."""
+        try:
+            await self.bot.reload_extension(module)
+        except commands.ExtensionError as e:
+            await ctx.send(f'{e.__class__.__name__}: {e}')
+        else:
+            await ctx.send('\N{OK HAND SIGN}')
 
-    def __unload(self):
-        asyncio.ensure_future(self.site.stop())
+    _GIT_PULL_REGEX = re.compile(r'\s*(?P<filename>.+?)\s*\|\s*[0-9]+\s*[+-]+')
+
+    def find_modules_from_git(self, output: str) -> list[tuple[int, str]]:
+        files = self._GIT_PULL_REGEX.findall(output)
+        ret: list[tuple[int, str]] = []
+        for file in files:
+            root, ext = os.path.splitext(file)
+            if ext != '.py':
+                continue
+
+            if root.startswith('cogs/'):
+                # A submodule is a directory inside the main cog directory for
+                # my purposes
+                ret.append((root.count('/') - 1, root.replace('/', '.')))
+
+        # For reload order, the submodules should be reloaded first
+        ret.sort(reverse=True)
+        return ret
+
+    async def reload_or_load_extension(self, module: str) -> None:
+        try:
+            await self.bot.reload_extension(module)
+        except commands.ExtensionNotLoaded:
+            await self.bot.load_extension(module)
+
+    @_reload.command(name='all', hidden=True)
+    async def _reload_all(self, ctx: Context):
+        """Reloads all modules, while pulling from git."""
+
+        async with ctx.typing():
+            stdout, stderr = await self.run_process('git pull')
+
+        # progress and stuff is redirected to stderr in git pull
+        # however, things like "fast forward" and files
+        # along with the text "already up-to-date" are in stdout
+
+        if stdout.startswith('Already up-to-date.'):
+            return await ctx.send(stdout)
+
+        modules = self.find_modules_from_git(stdout)
+        mods_text = '\n'.join(f'{index}. `{module}`' for index, (_, module) in enumerate(modules, start=1))
+        prompt_text = f'This will update the following modules, are you sure?\n{mods_text}'
+        confirm = await ctx.prompt(prompt_text, reacquire=False)
+        if not confirm:
+            return await ctx.send('Aborting.')
+
+        statuses = []
+        for is_submodule, module in modules:
+            if is_submodule:
+                try:
+                    actual_module = sys.modules[module]
+                except KeyError:
+                    statuses.append((ctx.tick(None), module))
+                else:
+                    try:
+                        importlib.reload(actual_module)
+                    except Exception as e:
+                        statuses.append((ctx.tick(False), module))
+                    else:
+                        statuses.append((ctx.tick(True), module))
+            else:
+                try:
+                    await self.reload_or_load_extension(module)
+                except commands.ExtensionError:
+                    statuses.append((ctx.tick(False), module))
+                else:
+                    statuses.append((ctx.tick(True), module))
+
+        await ctx.send('\n'.join(f'{status}: `{module}`' for status, module in statuses))
 
 
 async def setup(bot):
-    updater = Updater(bot)
-    await bot.add_cog(updater)
-    await bot.loop.create_task(updater.webserver())
-
-
+    await bot.add_cog(Updater(bot))

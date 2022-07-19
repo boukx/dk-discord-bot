@@ -3,6 +3,9 @@ import os
 import aiohttp
 import discord
 from discord.ext import commands
+from typing import Union
+
+from cogs.utils.context import Context
 
 
 class Lady(commands.Bot):
@@ -16,6 +19,9 @@ class Lady(commands.Bot):
             'cogs.updater',
             'cogs.log_review',
         )
+
+    async def get_context(self, origin: Union[discord.Interaction, discord.Message], /, *, cls=Context) -> Context:
+        return await super().get_context(origin, cls=cls)
 
     async def setup_hook(self):
         #self.background_task.start()
