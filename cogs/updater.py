@@ -13,7 +13,7 @@ class Updater(commands.Cog):
     """Admin-only commands that make the bot dynamic."""
 
     def __init__(self, bot):
-        self.bot = bot
+        self.bot: commands.Bot = bot
         self._last_result: Optional[Any] = None
 
     async def cog_load(self):
@@ -31,6 +31,10 @@ class Updater(commands.Cog):
 
     async def cog_check(self, ctx: Context) -> bool:
         return await self.bot.is_owner(ctx.author)
+
+    @commands.command(hidden=True, name='list')
+    async def _list(self, ctx: Context):
+        await ctx.send("Loaded extensions:\n" + "\n".join(self.bot.extensions.keys()))
 
     @commands.command(hidden=True)
     async def load(self, ctx: Context, *, module: str):
@@ -50,7 +54,7 @@ class Updater(commands.Cog):
         except commands.ExtensionError as e:
             await ctx.send(f'{e.__class__.__name__}: {e}')
         else:
-            await ctx.send('\N{OK HAND SIGN}')
+            await ctx.message.add_reaction('\N{WHITE HEAVY CHECK MARK}')
 
     @commands.group(name='reload', hidden=True, invoke_without_command=True)
     async def _reload(self, ctx: Context, *, module: str):
@@ -60,7 +64,7 @@ class Updater(commands.Cog):
         except commands.ExtensionError as e:
             await ctx.send(f'{e.__class__.__name__}: {e}')
         else:
-            await ctx.send('\N{OK HAND SIGN}')
+            await ctx.message.add_reaction('\N{WHITE HEAVY CHECK MARK}')
 
     _GIT_PULL_REGEX = re.compile(r'\s*(?P<filename>.+?)\s*\|\s*[0-9]+\s*[+-]+')
 
@@ -97,8 +101,9 @@ class Updater(commands.Cog):
         # progress and stuff is redirected to stderr in git pull
         # however, things like "fast forward" and files
         # along with the text "already up-to-date" are in stdout
+        print(stdout)
 
-        if stdout.startswith('Already up-to-date.'):
+        if stdout.startswith('Already'):
             return await ctx.send(stdout)
 
         modules = self.find_modules_from_git(stdout)

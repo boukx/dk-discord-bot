@@ -8,6 +8,7 @@ import io
 
 T = TypeVar('T')
 
+
 class ConfirmationView(discord.ui.View):
     def __init__(self, *, timeout: float, author_id: int, reacquire: bool, ctx: Context, delete_after: bool) -> None:
         super().__init__(timeout=timeout)
